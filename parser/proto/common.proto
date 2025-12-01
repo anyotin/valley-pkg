@@ -1,0 +1,23 @@
+syntax = "proto3";
+
+option optimize_for = LITE_RUNTIME;
+package pb;
+option go_package = "parser/pb_go";
+
+/**
+ * 共通 - リクエスト
+ */
+message CommonRequestParam {
+  // プレイヤーID（ユニークなID）
+  string player_id = 1;
+
+  // プラットフォームユーザーID
+  // iOS：UIDevice.identifierForVendor
+  // Android：AndroidID
+  // - 用途 -
+  // Bank送信用
+  string platform_user_id = 2;
+}
+
+// 実行コマンド
+// protoc -I .. --go_out=pb --go_opt=paths=source_relative common.proto

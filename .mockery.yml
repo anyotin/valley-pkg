@@ -1,0 +1,12 @@
+# https://vektra.github.io/mockery/v2.35/configuration/#recommended-basic-config:~:text=config%20is%20structured.-,Parameter%20Descriptions,-%C2%B6
+# https://vektra.github.io/mockery/v2.35/configuration/#layouts:~:text=.Mock%0A%7D-,Templated%20Strings,-%C2%B6
+all: false #
+dir: "{{.InterfaceDir}}/mock" # 出力先。{{.InterfaceDir}}はインターフェースが配置されているディレクトリ。
+filename: "mock_{{.InterfaceName | lower}}.go" # mock生成されるファイル名。
+formatter: goimports
+structname: "{{.Mock}}{{.InterfaceName}}" # 構造体名
+pkgname: "{{.SrcPackageName}}" # パッケージ名
+packages:
+  valley-pkg/crypter:
+    interfaces:
+      Crypter: {}
