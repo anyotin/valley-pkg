@@ -29,7 +29,7 @@ type UpdateRequest struct {
 	Ctx context.Context
 	// The update itself.
 	Update StateUpdate
-	// Return channel to confirm the write by sending back the assigned ticket ID
+	// チケットIDを返送することで書き込みを確認するための返信チャネル
 	ResultsChan chan *StateResponse
 }
 
@@ -71,7 +71,7 @@ func (tc *ReplicatedTicketCache) OutgoingReplicationQueue(ctx context.Context) {
 
 	for {
 		exec = false
-		pipelineRequests = pipelineRequests[:0]
+		pipelineRequests = pipelineRequests[:0] // 前回の処理で追加された分の容量はそのままにして初期化することで、余計なメモリ確保を防ぐ
 		pipeline = pipeline[:0]
 		timeout := time.After(time.Millisecond * time.Duration(tc.Cfg.OmCacheOutWaitTimeoutMs))
 
@@ -88,7 +88,6 @@ func (tc *ReplicatedTicketCache) OutgoingReplicationQueue(ctx context.Context) {
 					logger.Trace("OM_CACHE_OUT_MAX_QUEUE_THRESHOLD reached")
 					exec = true
 				}
-
 			// タイムアウトの場合、バッチのキューを万杯まで待たない
 			case <-timeout:
 				//otelCacheOutgoingQueueTimeouts.Add(ctx, 1)
@@ -114,6 +113,7 @@ func (tc *ReplicatedTicketCache) OutgoingReplicationQueue(ctx context.Context) {
 			}).Trace("state update batch results received from replicator")
 
 			for index, result := range results {
+				// リクエストしたチャネルに結果を送信
 				pipelineRequests[index].ResultsChan <- result
 			}
 		}
@@ -183,7 +183,6 @@ func (tc *ReplicatedTicketCache) IncomingReplicationQueue(ctx context.Context) {
 			// 残りの更新がなくなるかロックタイムアウトに達するまで、 すべての受信更新を処理する。
 			select {
 			case curUpdate := <-replStream:
-				// Still updates to process.
 				switch curUpdate.Cmd {
 				case Ticket:
 					// 更新値をプロトバフメッセージに変換し、 保存する。
@@ -201,14 +200,12 @@ func (tc *ReplicatedTicketCache) IncomingReplicationQueue(ctx context.Context) {
 						logger.Error("received ticket replication could not be unmarshalled")
 					}
 
-					// Set TicketID. Must do it post-replication since
-					// TicketID /is/ the Replication ID
-					// (e.g. redis stream entry id)
-					// This guarantees that the client can never get an
-					// invalid ticketID that was not successfully stored/replicated
+					// TicketIDを設定する。レプリケーション後に実行する必要がある。
+					// TicketID自体がレプリケーションID（例：RedisストリームエントリID）であるため
+					// これにより、クライアントが正常に保存/レプリケートされなかった無効なticketIDを取得する可能性を完全に排除できる
 					ticketPb.Id = curUpdate.Key
 
-					// All tickets begin inactive
+					// すべてのチケットは非アクティブ状態で開始
 					tc.InactiveSet.Store(curUpdate.Key, true)
 					tc.Tickets.Store(curUpdate.Key, ticketPb)
 					logger.Tracef("ticket replication received: %v", curUpdate.Key)
@@ -222,7 +219,7 @@ func (tc *ReplicatedTicketCache) IncomingReplicationQueue(ctx context.Context) {
 					logger.Tracef("deactivate replication received: %v", curUpdate.Key)
 
 				case Assign:
-					// Convert the assignment back into a protobuf message.
+					// protobuf messageに更新
 					assignmentPb := &pb.Assignment{}
 					err = proto.Unmarshal([]byte(curUpdate.Value), assignmentPb)
 					if err != nil {
@@ -232,12 +229,10 @@ func (tc *ReplicatedTicketCache) IncomingReplicationQueue(ctx context.Context) {
 					logger.Tracef("**DEPRECATED** assign replication received %v:%v", curUpdate.Key, assignmentPb.GetConnection())
 				}
 			case <-updateTimeout:
-				// Lock hold timeout exceeded
 				//otelCacheIncomingProcessingTimeouts.Add(ctx, 1)
 				logger.Trace("lock hold timeout")
 				done = true
 			default:
-				// Nothing left to process; exit immediately
 				logger.Trace("Incoming update queue empty")
 				done = true
 			}
@@ -266,21 +261,6 @@ func (tc *ReplicatedTicketCache) IncomingReplicationQueue(ctx context.Context) {
 		//   before they are in sessions. Such tickets are still allowed to be
 		//   assigned and their assignments will be retained until the
 		//   expiration time described above. **DEPRECATED**
-		//
-		// TODO: measure the impact of expiration operations with a timer
-		// metric under extreme load, and if it's problematic,
-		// revisit / possibly do it asynchronously
-		//
-		// Ticket IDs are assigned by Redis in the format of
-		// <unix_timestamp>-<index> where the index increments every time a
-		// ticket is created during the same second. We are only
-		// interested in the ticket creation time (the unix timestamp) here.
-		//
-		// The in-memory replication module just follows the redis entry ID
-		// convention so this works fine, but retrieving the creation time
-		// would need to be abstracted into a method of the stateReplicator
-		// interface if we ever support a different replication layer (for
-		// example, pub/sub).
 		{
 			// Separate logrus instance with its own metadata to aid troubleshooting
 			exLogger := logrus.WithFields(logrus.Fields{
@@ -289,11 +269,6 @@ func (tc *ReplicatedTicketCache) IncomingReplicationQueue(ctx context.Context) {
 				"operation": "expiration",
 			})
 
-			// Metrics are tallied in local variables. The values get copied to
-			// the module global values that the metrics actually sample after
-			// th tally is complete. This way the mid-tally values never get
-			// accidentally reported to the metrics sidecar (which could happen
-			// if we used the module global values to compute the tally)
 			var (
 				numInactive            int64
 				numInactiveDeletions   int64
@@ -304,35 +279,31 @@ func (tc *ReplicatedTicketCache) IncomingReplicationQueue(ctx context.Context) {
 			)
 			startTime := time.Now()
 
-			// Cull expired tickets from the local cache inactive ticket set.
-			// This expiration is done based on the entry time of the ticket
-			// into the system, and the maximum configured ticket TTL rather
-			// than when the ticket inactive state was created. This means that
-			// it is possible for a ticket that has already expired due to a
-			// user-configured expiration time to still persist in the inactive
-			// set for a short time. This is fine as an inactive set entry that
-			// refers to a non-existent ticket has no effect.
+			// ローカルキャッシュの非アクティブチケットセットから期限切れチケットを削除する。
+			// この期限切れ処理は、チケットがシステムに投入された時刻と設定された最大チケットTTLに基づいて行われ、
+			// チケットの非アクティブ状態が作成された時刻に基づくものではない。これはつまり、
+			// ユーザー設定の有効期限により既に期限切れとなったチケットが、
+			// 短時間だけ非アクティブセット内に残存する可能性があることを意味します。
+			// 存在しないチケットを参照する非アクティブセットのエントリは影響を与えないため、これは問題ありません。
 			tc.InactiveSet.Range(func(id, _ any) bool {
-				// Get creation timestamp from ID. Timestamp is always assumed
-				// to follow the redis stream entry id convention of
-				// millisecond precision (13-digit unix timestamp)
+				// IDから作成タイムスタンプを取得。タイムスタンプは常に RedisストリームエントリIDの規約に従い
+				// ミリ秒精度（13桁のUnixタイムスタンプ）であると仮定される
 				ticketCreationTime, err := strconv.ParseInt(strings.Split(id.(string), "-")[0], 10, 64)
 				if err != nil {
-					// error; log and go to the next entry
 					exLogger.WithFields(logrus.Fields{
 						"ticket_id": id,
 					}).Error("Unable to parse ticket ID into an unix timestamp when trying to expire old ticket active states")
 					return true
 				}
 				if (time.Now().UnixMilli() - ticketCreationTime) > int64(tc.Cfg.OmCacheTicketTtlMs) {
-					// Ensure that when expiring a ticket from the inactive set, the ticket is always deleted as well.
+					// 非アクティブセットからチケットを期限切れにする際、そのチケットが常に削除されることを保証する。
 					_, existed := tc.Tickets.LoadAndDelete(id)
 					if existed {
 						numTickets++
 						numTicketDeletions++
 					}
 
-					// Remove expired ticket from the inactive set.
+					// 無効なチケットを非アクティブセットから削除する。
 					tc.InactiveSet.Delete(id)
 					numInactiveDeletions++
 				} else {
@@ -341,7 +312,7 @@ func (tc *ReplicatedTicketCache) IncomingReplicationQueue(ctx context.Context) {
 				return true
 			})
 
-			// cull expired tickets from local cache based on the ticket's expiration time.
+			// チケットの有効期限に基づいて、ローカルキャッシュから期限切れのチケットを削除する。
 			tc.Tickets.Range(func(id, ticket any) bool {
 				if time.Now().After(ticket.(*pb.Ticket).GetExpirationTime().AsTime()) {
 					tc.Tickets.Delete(id)
@@ -352,18 +323,13 @@ func (tc *ReplicatedTicketCache) IncomingReplicationQueue(ctx context.Context) {
 				return true
 			})
 
-			// cull expired assignments from local cache. This uses similar
-			// logic to expiring a ticket from the inactive set, but includes
-			// an addition configurable TTL so that it is possible for
-			// assignments to persist and be retrieved even after the ticket no
-			// longer exists in the system.
-			//
-			// Note that assignment tracking is DEPRECATED functionality
-			// intended only for use while doing rapid matchmaker iteration,
-			// and we strongly recommend that you use a more robust player
-			// status tracking system in production.
+			// ローカルキャッシュから期限切れの割り当てを削除します。これは非アクティブセットからチケットを期限切れにするロジックと類似していますが、追加の構成可能なTTLを含みます。
+			// これにより、チケットがシステムに存在しなくなった後も、割り当てが保持され取得されることが可能になります。
+			// 割り当て追跡は非推奨機能であり、
+			// マッチメイカーの迅速な反復処理中にのみ使用することを意図しています。
+			// 本番環境では、より堅牢なプレイヤー状態追跡システムの使用を強く推奨します。
 			tc.Assignments.Range(func(id, _ any) bool {
-				// Get creation timestamp from ID
+				// IDから作成時刻を取得する
 				ticketCreationTime, err := strconv.ParseInt(strings.Split(id.(string), "-")[0], 10, 64)
 				if err != nil {
 					exLogger.Error("Unable to parse ticket ID into an unix timestamp when trying to expire old assignments")
