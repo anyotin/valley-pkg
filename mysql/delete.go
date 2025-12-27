@@ -7,26 +7,53 @@ import (
 	"strings"
 )
 
-type DeleteBuilder[W WhereState] struct {
+type deleteBuilder struct {
 	table string
 	where *WhereCond
 }
 
-// DeleteFrom は、指定されたテーブル名で初期化された新しい UpdateBuilder を作成します。
-func DeleteFrom(table string) DeleteBuilder[WithoutWhere] {
-	return DeleteBuilder[WithoutWhere]{table: table}
+// withWhere はクエリの WHERE 条件を設定し、更新された deleteBuilder インスタンスを返します。
+func (d deleteBuilder) withWhere(where *WhereCond) deleteBuilder {
+	d.where = where
+	return d
+}
+
+// build は DELETE SQL 文とその関連引数を構築し、前提条件が満たされていない場合にエラーを返します。
+func (d deleteBuilder) build() (string, []any, error) {
+	if d.where == nil {
+		return "", nil, ErrWhereRequired
+	}
+	if !safeIdent(d.table) {
+		return "", nil, fmt.Errorf("unsafe table: %s", d.table)
+	}
+
+	sb := strings.Builder{}
+	sb.WriteString("DELETE FROM ")
+	sb.WriteString(d.table)
+	sb.WriteString(" WHERE ")
+	sb.WriteString(d.where.GetSQL())
+
+	return sb.String(), d.where.args, nil
+}
+
+type DeleteWithoutWhere struct{ builder deleteBuilder }
+type DeleteWithWhere struct{ builder deleteBuilder }
+
+// DeleteFrom は、指定されたテーブル名で初期化された新しい DeleteWithoutWhere を作成します。
+func DeleteFrom(table string) DeleteWithoutWhere {
+	return DeleteWithoutWhere{builder: deleteBuilder{table: table}}
 }
 
 // Where WHERE条件をDeleteBuilderに追加し、WHERE句を持つ状態に移行します。
-func (b DeleteBuilder[WithoutWhere]) Where(c *WhereCond) DeleteBuilder[WithWhere] {
-	b.where = c
-	return DeleteBuilder[WithWhere](b)
+func (d DeleteWithoutWhere) Where(c *WhereCond) DeleteWithWhere {
+	d.builder = d.builder.withWhere(c)
+	return DeleteWithWhere(d)
 }
 
 // Exec は、指定されたコンテキスト内で提供されたデータベース接続に対して、ビルダーによって定義された DELETE SQL クエリを実行します。
 // 実行が成功した場合、影響を受けた行数を返します。失敗した場合はエラーを返します。
-func (b DeleteBuilder[WithWhere]) Exec(ctx context.Context, db *sqlx.DB) (int64, error) {
-	q, args, err := b.build()
+func (d DeleteWithWhere) Exec(ctx context.Context, db *sqlx.DB) (int64, error) {
+	q, args, err := d.builder.build()
 	if err != nil {
 		return 0, err
 	}
@@ -40,22 +67,4 @@ func (b DeleteBuilder[WithWhere]) Exec(ctx context.Context, db *sqlx.DB) (int64,
 		return 0, err
 	}
 	return res.RowsAffected()
-}
-
-// build は DELETE SQL 文とその関連引数を構築し、前提条件が満たされていない場合にエラーを返します。
-func (b DeleteBuilder[W]) build() (string, []any, error) {
-	if b.where == nil {
-		return "", nil, ErrWhereRequired
-	}
-	if !safeIdent(b.table) {
-		return "", nil, fmt.Errorf("unsafe table: %s", b.table)
-	}
-
-	sb := strings.Builder{}
-	sb.WriteString("DELETE FROM ")
-	sb.WriteString(b.table)
-	sb.WriteString(" WHERE ")
-	sb.WriteString(b.where.GetSQL())
-
-	return sb.String(), b.where.args, nil
 }

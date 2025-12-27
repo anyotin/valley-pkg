@@ -21,7 +21,7 @@ func TestUpdateBuilder(t *testing.T) {
 		WithArgs(name, tenant_id).
 		WillReturnResult(sqlmock.NewResult(0, 2)) // 2行更新された想定
 
-	upd, err := UpdateFrom("users").Set(UpdateCond{"name", "Alice"}).Where(Eq("tenant_id", tenant_id)).Exec(ctx, db)
+	upd, err := UpdateFrom[User]("users").Set(UpdateCond{"name", "Alice"}).Where(Eq("tenant_id", tenant_id)).Exec(ctx, db)
 	if err != nil {
 		t.Fatalf("Update error: %v", err)
 	}
@@ -44,7 +44,7 @@ func TestUpdateBuilder_Slice(t *testing.T) {
 		WithArgs(name, email, tenant_id).
 		WillReturnResult(sqlmock.NewResult(0, 2)) // 2行更新された想定
 
-	upd, err := UpdateFrom("users").Set(UpdateCond{"name", "Alice"}, UpdateCond{"email", email}).Where(Eq("tenant_id", tenant_id)).Exec(ctx, db)
+	upd, err := UpdateFrom[User]("users").Set(UpdateCond{"name", "Alice"}, UpdateCond{"email", email}).Where(Eq("tenant_id", tenant_id)).Exec(ctx, db)
 	if err != nil {
 		t.Fatalf("Update error: %v", err)
 	}

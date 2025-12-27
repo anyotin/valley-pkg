@@ -5,44 +5,223 @@ import (
 	"errors"
 	"fmt"
 	"github.com/jmoiron/sqlx"
+	"reflect"
 	"strconv"
 	"strings"
 )
 
 var (
-	ErrWhereRequired     = errors.New("where clause is required")
-	ErrColumnsNotFound   = errors.New("columns registry not found for table")
-	ErrExceptNeedsSchema = errors.New("except() requires registered columns for the table")
+	ErrWhereRequired            = errors.New("where clause is required")
+	ErrColumnsNotFound          = errors.New("columns registry not found for table")
+	ErrExceptNeedsSchema        = errors.New("except() requires registered columns for the table")
+	ErrNoColumnsLeftAfterExcept = errors.New("no columns left after except")
+	ErrSNotStruct               = errors.New("S must be struct or *struct")
+	ErrNoDBTags                 = errors.New("no db tags found in struct")
+	ErrDuplicateDBTag           = errors.New("duplicate db tag in struct")
 )
 
-// ==== Column registry（Except対応用） ====
+// ---- Builder ----
 
-type ColumnRegistry interface {
-	Columns(table string) ([]string, bool)
+type selectBuilder[S any] struct {
+	table   string
+	cols    []string
+	except  []string
+	where   *WhereCond
+	orderBy *OrderbyCond
+	limit   int
+	offset  int
 }
 
-type MapRegistry map[string][]string
-
-func (r MapRegistry) Columns(table string) ([]string, bool) {
-	cols, ok := r[table]
-	return cols, ok
+// withColumns は、指定された列を SELECT クエリに追加し、更新された selectBuilder インスタンスを返します。
+func (b selectBuilder[S]) withColumns(cols []string) selectBuilder[S] {
+	b.cols = append(b.cols, cols...)
+	return b
 }
 
-// パッケージ内で使う registry
-var registry ColumnRegistry = MapRegistry{}
+// withExcept は、指定された列を「除外」リストに追加し、更新された selectBuilder インスタンスを返します。
+func (b selectBuilder[S]) withExcept(except []string) selectBuilder[S] {
+	b.except = append(b.except, except...)
+	return b
+}
 
-// SetRegistry ベースのカラム設定
-func SetRegistry(r ColumnRegistry) { registry = r }
+// withWhere はクエリの WHERE 条件を設定し、更新された selectBuilder インスタンスを返します。
+func (b selectBuilder[S]) withWhere(where *WhereCond) selectBuilder[S] {
+	b.where = where
+	return b
+}
 
-// ==== WHERE強制のための phantom types ====
+// withOrderBy はクエリの ORDER BY 条件を設定し、更新された selectBuilder インスタンスを返します。
+func (b selectBuilder[S]) withOrderBy(cond *OrderbyCond) selectBuilder[S] {
+	b.orderBy = cond
+	return b
+}
 
-type WhereState interface{ isWhereState() }
+// withLimit はクエリで返される行数に制限を設定し、更新された selectBuilder を返します。
+func (b selectBuilder[S]) withLimit(limit int) selectBuilder[S] {
+	b.limit = limit
+	return b
+}
 
-type WithoutWhere struct{} // WithoutWhere Where句を所持していない状態
-type WithWhere struct{}    // WithWhere Where句を所持している状態
+// withOffset はクエリ結果のオフセットを設定し、更新された selectBuilder を返します。
+func (b selectBuilder[S]) withOffset(offset int) selectBuilder[S] {
+	b.offset = offset
+	return b
+}
 
-func (WithoutWhere) isWhereState() {}
-func (WithWhere) isWhereState()    {}
+// buildWithWhere は WHERE 句を含む SQL SELECT クエリを構築し、クエリ文字列、引数、およびエラーを返します。
+// WHERE 条件が指定されていない場合、ErrWhereRequired を返します。
+func (b selectBuilder[S]) buildWithWhere() (string, []any, error) {
+	if b.where == nil {
+		return "", nil, ErrWhereRequired
+	}
+
+	sb, err := b.buildHead()
+	if err != nil {
+		return "", nil, err
+	}
+
+	fmt.Printf("sb:  %s\n", sb.String())
+
+	sb.WriteString(" WHERE ")
+	fmt.Printf("sb:  %s\n", sb.String())
+
+	sb.WriteString(b.where.GetSQL())
+
+	fmt.Printf("sb:  %s\n", sb.String())
+
+	b.buildTail(sb)
+	return sb.String(), b.where.GwtArgs(), nil
+}
+
+// buildWithoutWhere は WHERE 句を除外した SQL SELECT クエリを構築し、クエリ文字列と発生したエラーを返します。
+func (b selectBuilder[S]) buildWithoutWhere() (string, []any, error) {
+	sb, err := b.buildHead()
+	if err != nil {
+		return "", nil, err
+	}
+
+	b.buildTail(sb)
+	return sb.String(), nil, nil
+}
+
+// buildHead は、SELECT 列と FROM 句を含む SQL SELECT クエリの初期セグメントを構築します。
+func (b selectBuilder[S]) buildHead() (*strings.Builder, error) {
+	if !safeIdent(b.table) {
+		return nil, fmt.Errorf("unsafe table: %s", b.table)
+	}
+
+	selectCols, err := b.pickColumns()
+	if err != nil {
+		return nil, err
+	}
+
+	sb := new(strings.Builder)
+	sb.WriteString("SELECT ")
+	sb.WriteString(selectCols)
+	sb.WriteString(" FROM ")
+	sb.WriteString(b.table)
+	return sb, nil
+}
+
+// buildTail は、ビルダーで設定されている場合、指定された SQL クエリに ORDER BY、LIMIT、および OFFSET 句を追加します。
+func (b selectBuilder[S]) buildTail(sb *strings.Builder) {
+	if b.orderBy != nil {
+		sb.WriteString(" ORDER BY ")
+		sb.WriteString(b.orderBy.GetSQL())
+	}
+	if b.limit != 0 {
+		sb.WriteString(" LIMIT " + strconv.Itoa(b.limit))
+	}
+	if b.offset != 0 {
+		sb.WriteString(" OFFSET " + strconv.Itoa(b.offset))
+	}
+}
+
+// pickColumns は、含まれる列または除外される列に基づいて、クエリで選択する列を決定します。
+// 除外された列の結果として列が存在しない場合、エラーを返します。それ以外の場合は、カンマ区切りの列の文字列を返します。
+func (b selectBuilder[S]) pickColumns() (string, error) {
+	selectCols := ""
+	switch {
+	case len(b.cols) > 0:
+		selectCols = strings.Join(b.cols, ",")
+		return selectCols, nil
+	case len(b.except) > 0:
+		cols, err := b.columnsOf()
+		if err != nil {
+			return "", ErrExceptNeedsSchema
+		}
+		exSet := map[string]struct{}{}
+		for _, c := range b.except {
+			exSet[c] = struct{}{}
+		}
+		var picked []string
+		for _, c := range cols {
+			if _, ng := exSet[c]; !ng {
+				picked = append(picked, c)
+			}
+		}
+		if len(picked) == 0 {
+			return "", ErrNoColumnsLeftAfterExcept
+		}
+		selectCols = strings.Join(picked, ",")
+		return selectCols, nil
+	default:
+		selectCols = "*"
+		return selectCols, nil
+	}
+}
+
+// columnsOf は、構造体型のデータベースタグから列名を抽出し、カンマ区切りの文字列として返します。
+func (b selectBuilder[S]) columnsOf() ([]string, error) {
+	// 型を取り出し
+	var zero S
+	t := reflect.TypeOf(zero)
+	if t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+	if t.Kind() != reflect.Struct {
+		return nil, ErrSNotStruct
+	}
+
+	cols, err := columnsFromDBTags(t)
+	if err != nil {
+		return nil, err
+	}
+	if len(cols) == 0 {
+		return nil, ErrNoDBTags
+	}
+
+	return cols, nil
+}
+
+// columnsFromDBTags は、構造体フィールドから「db」タグを持つ列名を抽出します。一意性を保証し、指定されたフィールドはスキップします。
+// 列名のスライスを返します。重複タグが存在する場合やその他の問題が発生した場合はエラーを返します。
+func columnsFromDBTags(t reflect.Type) ([]string, error) {
+	var cols []string
+	seen := map[string]struct{}{}
+
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+
+		tag := f.Tag.Get("db")
+		if tag == "" || tag == "-" {
+			continue
+		}
+		name := tag
+		if idx := strings.IndexByte(tag, ','); idx >= 0 {
+			name = tag[:idx]
+		}
+		if name == "" || name == "-" {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			return nil, ErrDuplicateDBTag
+		}
+		seen[name] = struct{}{}
+		cols = append(cols, name)
+	}
+	return cols, nil
+}
 
 // ---- 共通：identifier の超最低限チェック（任意） ----
 // ※本気でやるなら “テーブル名/列名は定数のみ” 運用に寄せるのが安全
@@ -61,123 +240,85 @@ func safeIdent(s string) bool {
 	return true
 }
 
-// ---- SELECT ----
+// ----- Select -----
 
-type SelectBuilder[S any, W WhereState] struct {
-	table   string
-	cols    []string
-	except  []string
-	where   *WhereCond
-	orderBy *OrderbyCond
-	limit   int
-	offset  int
+type SelectWithoutWhere[S any] struct{ builder selectBuilder[S] }
+type SelectWithWhere[S any] struct{ builder selectBuilder[S] }
+
+// SelectFrom は指定されたテーブル名で selectBuilder を初期化
+func SelectFrom[S any](table string) SelectWithoutWhere[S] {
+	return SelectWithoutWhere[S]{builder: selectBuilder[S]{table: table}}
 }
 
-type SelectBuilder2[S any] struct {
-	table   string
-	cols    []string
-	except  []string
-	where   *WhereCond
-	orderBy *OrderbyCond
-	limit   int
-	offset  int
-}
-type SelectWithoutWhere[S any] struct{ b SelectBuilder2[S] }
-type SelectWithWhere[S any] struct{ b SelectBuilder2[S] }
-
-// SelectFrom は指定されたテーブル名で SelectBuilder を初期化
-func SelectFrom[S any](table string) SelectBuilder[S, WithoutWhere] {
-	return SelectBuilder[S, WithoutWhere]{table: table}
+// Columns はクエリで選択する列を設定し、更新された SelectWithWhere インスタンスを返します。
+func (s SelectWithWhere[S]) Columns(cols ...string) SelectWithWhere[S] {
+	s.builder = s.builder.withColumns(cols)
+	return s
 }
 
-func SelectFrom2[S any](table string) SelectWithoutWhere[S] {
-	return SelectWithoutWhere[S]{b: SelectBuilder2[S]{table: table}}
+// Columns はクエリで選択する列を設定し、更新された SelectWithoutWhere インスタンスを返します。
+func (s SelectWithoutWhere[S]) Columns(cols ...string) SelectWithoutWhere[S] {
+	s.builder = s.builder.withColumns(cols)
+	return s
 }
 
-// Columns は取得するカラムを指定
-func (b SelectBuilder[S, W]) Columns(cols ...string) SelectBuilder[S, W] {
-	b.cols = append([]string{}, cols...)
-	return b
+// Except はクエリの選択から除外する列名を指定し、新しい SelectWithWhere インスタンスを返します。
+func (s SelectWithWhere[S]) Except(cols ...string) SelectWithWhere[S] {
+	s.builder = s.builder.withExcept(cols)
+	return s
 }
 
-func (b SelectBuilder2[S]) Columns(cols ...string) SelectBuilder2[S] {
-	b.cols = append([]string{}, cols...)
-	return b
+// Except はクエリの選択から除外する列名を指定し、新しい SelectWithoutWhere インスタンスを返します。
+func (s SelectWithoutWhere[S]) Except(cols ...string) SelectWithoutWhere[S] {
+	s.builder = s.builder.withExcept(cols)
+	return s
 }
 
-func (b SelectBuilder[S, W]) Except(cols ...string) SelectBuilder[S, W] {
-	b.except = append([]string{}, cols...)
-	return b
-}
-
-func (b SelectBuilder2[S]) Except(cols ...string) SelectBuilder2[S] {
-	b.except = append([]string{}, cols...)
-	return b
-}
-
-// Where WHERE句の指定
-func (b SelectBuilder[S, WithoutWhere]) Where(cond *WhereCond) SelectBuilder[S, WithWhere] {
-	nb := SelectBuilder[S, WithWhere](b)
-	nb.where = cond
-	return nb
-}
-
+// Where 指定された条件をクエリに適用し、更新されたビルダーを持つ新しい SelectWithWhere インスタンスを返します。
 func (s SelectWithoutWhere[S]) Where(cond *WhereCond) SelectWithWhere[S] {
-	s.b.where = cond
-	return SelectWithWhere[S]{b: s.b}
+	s.builder = s.builder.withWhere(cond)
+	return SelectWithWhere[S]{builder: s.builder}
 }
 
-// OrderBy OrderBy
-func (b SelectBuilder[S, W]) OrderBy(cond *OrderbyCond) SelectBuilder[S, W] {
-	b.orderBy = cond
-	return b
+// OrderBy は、指定された OrderbyCond を使用してクエリの順序付け条件を設定し、更新された SelectWithWhere を返します。
+func (s SelectWithWhere[S]) OrderBy(cond *OrderbyCond) SelectWithWhere[S] {
+	s.builder = s.builder.withOrderBy(cond)
+	return s
 }
 
-// OrderBy OrderBy
-func (b SelectBuilder2[S]) OrderBy(cond *OrderbyCond) SelectBuilder2[S] {
-	b.orderBy = cond
-	return b
+// OrderBy は、指定された OrderbyCond を使用してクエリの順序付け条件を設定し、更新された SelectWithoutWhere を返します。
+func (s SelectWithoutWhere[S]) OrderBy(cond *OrderbyCond) SelectWithoutWhere[S] {
+	s.builder = s.builder.withOrderBy(cond)
+	return s
 }
 
-// Limit 取得データ数の制限
-func (b SelectBuilder[S, W]) Limit(n int) SelectBuilder[S, W] {
-	b.limit = n
-	return b
+// Limit は返す行の最大数を設定し、SelectWithWhere インスタンスを更新します。
+func (s SelectWithWhere[S]) Limit(limit int) SelectWithWhere[S] {
+	s.builder = s.builder.withLimit(limit)
+	return s
 }
 
-func (b SelectBuilder2[S]) Limit(n int) SelectBuilder2[S] {
-	b.limit = n
-	return b
+// Limit は返す行の最大数を設定し、SelectWithoutWhere インスタンスを更新します。
+func (s SelectWithoutWhere[S]) Limit(limit int) SelectWithoutWhere[S] {
+	s.builder = s.builder.withLimit(limit)
+	return s
 }
 
-// Offset データの取得を行う最初の位置を指定
-func (b SelectBuilder[S, W]) Offset(n int) SelectBuilder[S, W] {
-	b.offset = n
-	return b
+// Offset はクエリでスキップする行数を設定し、更新された SelectWithWhere インスタンスを返します。
+func (s SelectWithWhere[S]) Offset(offset int) SelectWithWhere[S] {
+	s.builder = s.builder.withLimit(offset)
+	return s
 }
 
-func (b SelectBuilder2[S]) Offset(n int) SelectBuilder2[S] {
-	b.offset = n
-	return b
+// Offset はクエリでスキップする行数を設定し、更新された SelectWithoutWhere インスタンスを返します。
+func (s SelectWithoutWhere[S]) Offset(offset int) SelectWithoutWhere[S] {
+	s.builder = s.builder.withLimit(offset)
+	return s
 }
 
-// FetchAll 実行：複数行
-//func (b SelectBuilder[S, WithWhere]) FetchAll(ctx context.Context, db *sqlx.DB) ([]S, error) {
-//	q, args, err := b.build()
-//	if err != nil {
-//		return nil, err
-//	}
-//	q = db.Rebind(q)
-//
-//	var dest []S
-//	if err := db.SelectContext(ctx, &dest, q, args...); err != nil {
-//		return nil, err
-//	}
-//	return dest, nil
-//}
-
-func (b SelectWithWhere[S]) FetchAll(ctx context.Context, db *sqlx.DB) ([]S, error) {
-	q, args, err := b.b.build()
+// FetchAll は、構築されたクエリとバインディングに基づいて SQL SELECT クエリを実行し、一致するすべての行をスライスとして返します。
+func (s SelectWithWhere[S]) FetchAll(ctx context.Context, db *sqlx.DB) ([]S, error) {
+	q, args, err := s.builder.buildWithWhere()
 	if err != nil {
 		return nil, err
 	}
@@ -190,82 +331,49 @@ func (b SelectWithWhere[S]) FetchAll(ctx context.Context, db *sqlx.DB) ([]S, err
 	return dest, nil
 }
 
-// Fetch 実行：1行（見つからない場合は sql.ErrNoRows を返す方針）
-//func (b SelectBuilder[S, W]) Fetch(ctx context.Context, db *sqlx.DB) (S, error) {
-//	q, args, err := b.build()
-//	if err != nil {
-//		var zero S
-//		return zero, err
-//	}
-//	q = db.Rebind(q)
-//
-//	var dest S
-//	if err := db.GetContext(ctx, &dest, q, args...); err != nil {
-//		return dest, err
-//	}
-//	return dest, nil
-//}
-
-// build クエリ式の作成
-func (b SelectBuilder2[S]) build() (string, []any, error) {
-	if b.where == nil {
-		return "", nil, ErrWhereRequired
+// FetchAll は構築された SQL SELECT クエリを実行し、すべての行を S 型のスライスとして取得します。
+func (s SelectWithoutWhere[S]) FetchAll(ctx context.Context, db *sqlx.DB) ([]S, error) {
+	q, args, err := s.builder.buildWithoutWhere()
+	if err != nil {
+		return nil, err
 	}
+	q = db.Rebind(q)
 
-	// テーブル名の文字列チェック
-	if !safeIdent(b.table) {
-		return "", nil, fmt.Errorf("unsafe table: %s", b.table)
+	var dest []S
+	if err := db.SelectContext(ctx, &dest, q, args...); err != nil {
+		return nil, err
 	}
+	return dest, nil
+}
 
-	selectCols := ""
-	switch {
-	case len(b.cols) > 0:
-		selectCols = strings.Join(b.cols, ",")
-	case len(b.except) > 0:
-		cols, ok := registry.Columns(b.table)
-		if !ok {
-			return "", nil, ErrExceptNeedsSchema
-		}
-		exSet := map[string]struct{}{}
-		for _, c := range b.except {
-			exSet[c] = struct{}{}
-		}
-		var picked []string
-		for _, c := range cols {
-			if _, ng := exSet[c]; !ng {
-				picked = append(picked, c)
-			}
-		}
-		if len(picked) == 0 {
-			return "", nil, fmt.Errorf("no columns left after except")
-		}
-		selectCols = strings.Join(picked, ",")
-	default:
-		selectCols = "*"
+// Fetch は SQL SELECT クエリを実行し、構築されたクエリとバインディングに基づいて結果の単一行を取得します。
+func (s SelectWithWhere[S]) Fetch(ctx context.Context, db *sqlx.DB) (S, error) {
+	q, args, err := s.builder.buildWithWhere()
+	if err != nil {
+		var zero S
+		return zero, err
 	}
+	q = db.Rebind(q)
 
-	sb := strings.Builder{}
-	sb.WriteString("SELECT ")
-	sb.WriteString(selectCols)
-	sb.WriteString(" FROM ")
-	sb.WriteString(b.table)
-	sb.WriteString(" WHERE ")
-	sb.WriteString(b.where.GetSQL())
-
-	if b.orderBy != nil {
-		sb.WriteString(" ORDER BY ")
-		sb.WriteString(b.orderBy.GetSQL())
+	var dest S
+	if err := db.GetContext(ctx, &dest, q, args...); err != nil {
+		return dest, err
 	}
-	if b.limit != 0 {
-		sb.WriteString(" LIMIT " + strconv.Itoa(b.limit))
-	}
-	if b.offset != 0 {
-		sb.WriteString(" OFFSET " + strconv.Itoa(b.offset))
-	}
+	return dest, nil
+}
 
-	fmt.Println(sb.String())
-	fmt.Printf("%+v\n", b.where.GwtArgs())
+// Fetch は SQL SELECT クエリを実行し、構築されたクエリとバインディングに基づいて結果の単一行を取得します。
+func (s SelectWithoutWhere[S]) Fetch(ctx context.Context, db *sqlx.DB) (S, error) {
+	q, args, err := s.builder.buildWithoutWhere()
+	if err != nil {
+		var zero S
+		return zero, err
+	}
+	q = db.Rebind(q)
 
-	//return sb.String(), b.where.GwtArgs(), nil
-	return sb.String(), b.where.GwtArgs(), nil
+	var dest S
+	if err := db.GetContext(ctx, &dest, q, args...); err != nil {
+		return dest, err
+	}
+	return dest, nil
 }

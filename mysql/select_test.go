@@ -10,8 +10,8 @@ import (
 )
 
 type User struct {
-	ID        int        `db:"id"`
-	TenantID  string     `db:"tenant_id"`
+	Id        int        `db:"id"`
+	TenantId  string     `db:"tenant_id"`
 	Name      string     `db:"name"`
 	Email     string     `db:"email"`
 	CreatedAt time.Time  `db:"created_at"`
@@ -59,10 +59,7 @@ func TestSelectBuilder_Where(t *testing.T) {
 		WithArgs(tenant_id, tenant_id, name).
 		WillReturnRows(prepareRows())
 
-	//got, err := SelectFrom[User]("users").
-	//	Where(Or(And(Eq("tenant_id", tenant_id), Eq("tenant_id", tenant_id)), Eq("name", name))).
-	//	FetchAll(ctx, db)
-	got, err := SelectFrom2[User]("users").
+	got, err := SelectFrom[User]("users").
 		Where(Or(And(Eq("tenant_id", tenant_id), Eq("tenant_id", tenant_id)), Eq("name", name))).
 		FetchAll(ctx, db)
 	if err != nil {
@@ -72,7 +69,7 @@ func TestSelectBuilder_Where(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("len(got) = %d, want 2", len(got))
 	}
-	if got[0].ID != 1 || got[0].Name != "Alice" {
+	if got[0].Id != 1 || got[0].Name != "Alice" {
 		t.Fatalf("got[0] = %+v", got[0])
 	}
 
@@ -82,6 +79,7 @@ func TestSelectBuilder_Where(t *testing.T) {
 	}
 }
 
+// TestSelectBuilder_WithoutWhere は WHERE 句なしの SelectFrom 関数をテストし、期待されるクエリと結果を検証します。
 func TestSelectBuilder_WithoutWhere(t *testing.T) {
 	ctx := context.Background()
 
@@ -101,7 +99,7 @@ func TestSelectBuilder_WithoutWhere(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("len(got) = %d, want 2", len(got))
 	}
-	if got[0].ID != 1 || got[0].Name != "Alice" {
+	if got[0].Id != 1 || got[0].Name != "Alice" {
 		t.Fatalf("got[0] = %+v", got[0])
 	}
 
@@ -111,6 +109,7 @@ func TestSelectBuilder_WithoutWhere(t *testing.T) {
 	}
 }
 
+// TestSelectBuilder_OrderBy は、SELECT クエリビルダーの ORDER BY 句が正しい SQL を生成する機能を検証します。
 func TestSelectBuilder_OrderBy(t *testing.T) {
 	ctx := context.Background()
 	db, mock, cleanup := newMockDB(t)
@@ -133,6 +132,7 @@ func TestSelectBuilder_OrderBy(t *testing.T) {
 	t.Logf("got: %+v", got)
 }
 
+// TestSelectBuilder_LimitOffset は、SelectFrom の Limit および Offset の動作を検証し、クエリの適切な構築と実行を保証します。
 func TestSelectBuilder_LimitOffset(t *testing.T) {
 	ctx := context.Background()
 	db, mock, cleanup := newMockDB(t)
@@ -155,6 +155,8 @@ func TestSelectBuilder_LimitOffset(t *testing.T) {
 	t.Logf("got: %+v", got)
 }
 
+// TestSelectBuilder_Except は、クエリから指定された列を除外するための Select ビルダーの Except メソッドの動作を検証します。
+// 正しいクエリの生成、パラメータのバインディング、およびデータベースからの期待される行の正常な取得をテストします。
 func TestSelectBuilder_Except(t *testing.T) {
 	ctx := context.Background()
 	db, mock, cleanup := newMockDB(t)
@@ -166,10 +168,6 @@ func TestSelectBuilder_Except(t *testing.T) {
 	mock.ExpectQuery(regexp.QuoteMeta(expectedSQL)).
 		WithArgs(tid).
 		WillReturnRows(prepareRows())
-
-	SetRegistry(MapRegistry{
-		"users": {"id", "tenant_id", "name", "email", "created_at", "deleted_at"},
-	})
 
 	got, err := SelectFrom[User]("users").Except("created_at", "deleted_at").
 		Where(Eq("tenant_id", tid)).
