@@ -34,3 +34,10 @@
 ・[詳細図解 TCP](https://zenn.dev/baayan/articles/0ec3199ea3d5bc)<br>
 ・[tcpの仕様上、接続先がコネクションをcloseしているかはパケットを一度は実際に送るまでわからないよという話](https://qiita.com/behiron/items/3719430e12cb770980f3)<br>
 ・[世にも恐ろしいSIGPIPE、ソケットプログラミングの落とし穴](https://doi-t.hatenablog.com/entry/2014/06/10/033309)
+
+## Bufio
+
+・[Go でファイルを1行ずつ読み込む（csv ファイルも）](https://qiita.com/ikawaha/items/28186d965780fab5533d)<br>
+・[Go 言語における Scanning の特性と使い分け](https://www.ren510.dev/blog/competitive-programming-tle)<br>
+・[Go言語でファイルのバッファリング読み込みをやってみた](https://baubaubau.hatenablog.com/entry/2017/11/16/192103)<br>
+・[Golangのバッファってよくできてるよな](https://note.crohaco.net/2019/golang-buffer/#google_vignette)
