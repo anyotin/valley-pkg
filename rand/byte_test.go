@@ -7,8 +7,8 @@ import (
 	"testing"
 )
 
-func TestGenerateRandomBytes(t *testing.T) {
-	result, err := GenerateRandomBytes(16)
+func TestGenerateRandomString(t *testing.T) {
+	result, err := GenerateRandomString(16)
 	assert.NoError(t, err)
 
 	assert.Len(t, result, 16)
@@ -23,7 +23,7 @@ func TestDuplicateProbability(t *testing.T) {
 	generated := make(map[string]bool)
 
 	for i := 0; i < iterations; i++ {
-		str, err := GenerateRandomBytes(length)
+		str, err := GenerateRandomString(length)
 		assert.NoError(t, err)
 
 		if generated[str] {

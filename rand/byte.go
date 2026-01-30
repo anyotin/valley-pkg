@@ -8,8 +8,8 @@ import (
 // Letters URL-safe な英数字
 const Letters = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 
-// GenerateRandomBytes 指定されたバイト数のランダムな文字列を生成します
-func GenerateRandomBytes(length int) (string, error) {
+// GenerateRandomString 指定された数のランダムな文字列を生成します
+func GenerateRandomString(length int) (string, error) {
 	if length <= 0 {
 		return "", fmt.Errorf("length must be a positive integer: %d", length)
 	}

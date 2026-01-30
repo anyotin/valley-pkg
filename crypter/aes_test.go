@@ -8,8 +8,8 @@ import (
 )
 
 func TestAes_pkcs7Pad(t *testing.T) {
-	aesKey, _ := rand.GenerateRandomBytes(32)
-	aesIv, _ := rand.GenerateRandomBytes(16)
+	aesKey, _ := rand.GenerateRandomString(32)
+	aesIv, _ := rand.GenerateRandomString(16)
 
 	aes := Aes{aesKey: []byte(aesKey), aesIv: []byte(aesIv)}
 
@@ -69,8 +69,8 @@ func TestAes_pkcs7Pad(t *testing.T) {
 }
 
 func TestAes_pkcs7RemovePad(t *testing.T) {
-	aesKey, _ := rand.GenerateRandomBytes(32)
-	aesIv, _ := rand.GenerateRandomBytes(16)
+	aesKey, _ := rand.GenerateRandomString(32)
+	aesIv, _ := rand.GenerateRandomString(16)
 
 	aes := Aes{aesKey: []byte(aesKey), aesIv: []byte(aesIv)}
 
@@ -148,8 +148,8 @@ func TestAes_pkcs7RemovePad(t *testing.T) {
 }
 
 func TestAes_EnCrypt(t *testing.T) {
-	aesKey, _ := rand.GenerateRandomBytes(32)
-	aseIv, _ := rand.GenerateRandomBytes(16)
+	aesKey, _ := rand.GenerateRandomString(32)
+	aseIv, _ := rand.GenerateRandomString(16)
 
 	aes, err := NewAes(aesKey, aseIv)
 	assert.NoError(t, err)
@@ -222,8 +222,8 @@ func TestAes_EnCrypt(t *testing.T) {
 }
 
 func TestAes_DeCrypt(t *testing.T) {
-	aesKey, _ := rand.GenerateRandomBytes(32)
-	aseIv, _ := rand.GenerateRandomBytes(16)
+	aesKey, _ := rand.GenerateRandomString(32)
+	aseIv, _ := rand.GenerateRandomString(16)
 
 	aes, err := NewAes(aesKey, aseIv)
 	assert.NoError(t, err)
@@ -327,7 +327,7 @@ func TestAes_DeCrypt(t *testing.T) {
 		assert.NoError(t, err)
 
 		// 異なるIVで新しいAesインスタンスを作成
-		differentIv, _ := rand.GenerateRandomBytes(16)
+		differentIv, _ := rand.GenerateRandomString(16)
 		aes2, err := NewAes(aesKey, differentIv)
 		assert.NoError(t, err)
 
@@ -346,7 +346,7 @@ func TestAes_DeCrypt(t *testing.T) {
 		assert.NoError(t, err)
 
 		// 異なる鍵で新しいAesインスタンスを作成
-		differentKey, _ := rand.GenerateRandomBytes(32)
+		differentKey, _ := rand.GenerateRandomString(32)
 		aes2, err := NewAes(differentKey, aseIv)
 		assert.NoError(t, err)
 

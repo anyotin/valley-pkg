@@ -29,8 +29,8 @@ func TestWriteReadMessage_RoundTrip(t *testing.T) {
 
 	resultCh := make(chan readResult, 1)
 
-	aesKey, _ := rand.GenerateRandomBytes(32)
-	aseIv, _ := rand.GenerateRandomBytes(16)
+	aesKey, _ := rand.GenerateRandomString(32)
+	aseIv, _ := rand.GenerateRandomString(16)
 	aes, _ := crypter.NewAes(aesKey, aseIv)
 
 	// server goroutine
